@@ -1,14 +1,13 @@
-// PERSONAL ASSISTANT BOT
-// A private Slack bot for personal productivity: Tasks, Reminders, Vault, Habits, and Parking Lot
-
+// PERSONAL ASSISTANT BOT (RESTRUCTURED WITH MODALS, REMINDERS & DELETION)
 import http from 'node:http';
 import pkg from '@slack/bolt';
 import { config } from 'dotenv';
 import admin from 'firebase-admin';
+import cron from 'node-cron';
 
 config();
 
-// Health check for hosting
+// Health check
 http.createServer((_req, res) => {
     res.writeHead(200);
     res.end('Personal Assistant is online.');
@@ -20,41 +19,21 @@ const { App, LogLevel } = pkg;
 // FIREBASE ADMIN SETUP
 // ==========================================
 const serviceAccount = {
-  projectId: process.env.FIREBASE_PROJECT_ID,
-  clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-  privateKey: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
+    projectId: process.env.FIREBASE_PROJECT_ID,
+    clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+    privateKey: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
 };
 
-if (!serviceAccount.projectId || !serviceAccount.clientEmail || !serviceAccount.privateKey) {
-    console.error('❌ Firebase Admin credentials missing. Add FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, FIREBASE_PRIVATE_KEY to .env');
-    process.exit(1);
-}
-
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
-});
-
+admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
 const db = admin.firestore();
 const appId = process.env.__app_id || 'personal-bot-default';
 
-// ==========================================
-// FIRESTORE COLLECTION HELPERS
-// ==========================================
+// Helpers
 const getCol = (userId, type) => db.collection('artifacts').doc(appId).collection('users').doc(userId).collection(type);
-const getTasksCol = (userId) => getCol(userId, 'tasks');
-const getLogsCol = (userId) => getCol(userId, 'logs');
-const getVaultCol = (userId) => getCol(userId, 'vault');
-const getHabitsCol = (userId) => getCol(userId, 'habits');
-const getParkingLotCol = (userId) => getCol(userId, 'parking_lot');
 
 // ==========================================
 // SLACK APP CONFIGURATION
 // ==========================================
-if (!process.env.SLACK_BOT_TOKEN || !process.env.SLACK_APP_TOKEN) {
-    console.error('❌ Slack tokens not set. Configure SLACK_BOT_TOKEN and SLACK_APP_TOKEN in .env');
-    process.exit(1);
-}
-
 const slackApp = new App({
     token: process.env.SLACK_BOT_TOKEN,
     socketMode: true,
@@ -63,226 +42,214 @@ const slackApp = new App({
 });
 
 // ==========================================
-// 1. PRODUCTIVITY: FOCUS TIMER
+// 1. REMINDERS ENGINE (CRON)
 // ==========================================
+cron.schedule('* * * * *', async () => {
+    const now = new Date();
+    const currentDay = now.toLocaleString('en-us', { weekday: 'long' });
+    const currentTime = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
 
-slackApp.command('/focus', async ({ command, ack, client }) => {
-    await ack();
-    const parts = command.text.split(' ');
-    const minutes = parseInt(parts[0]);
-    const task = parts.slice(1).join(' ') || "Deep Work";
+    try {
+        const usersSnapshot = await db.collection('artifacts').doc(appId).collection('users').get();
+        for (const userDoc of usersSnapshot.docs) {
+            const reminders = await userDoc.ref.collection('reminders').get();
+            reminders.forEach(async (rem) => {
+                const data = rem.data();
+                const shouldFire = (data.frequency === 'daily' && data.time === currentTime) ||
+                                   (data.frequency === 'weekly' && data.day === currentDay && data.time === currentTime);
 
-    if (isNaN(minutes)) {
-        return await client.chat.postEphemeral({
-            channel: command.channel_id,
-            user: command.user_id,
-            text: "Usage: `/focus [minutes] [task]`"
-        });
-    }
-
-    await client.chat.postEphemeral({
-        channel: command.channel_id,
-        user: command.user_id,
-        text: `⏳ Focus timer set for *${minutes}m*: _${task}_.`
-    });
-
-    setTimeout(async () => {
-        try {
-            await client.chat.postMessage({
-                channel: command.user_id,
-                text: `🔔 *Time's up!* Focus session over: *${task}*`,
-                blocks: [
-                    { type: "section", text: { type: "mrkdwn", text: `🔔 *Time's up!* Focus session over: *${task}*` } },
-                    { type: "actions", elements: [{ type: "button", text: { type: "plain_text", text: "Log as Done" }, action_id: "log_focus_done", value: task }] }
-                ]
+                if (shouldFire) {
+                    await slackApp.client.chat.postMessage({
+                        channel: userDoc.id,
+                        text: `⏰ *Reminder:* ${data.text}`
+                    });
+                }
             });
-        } catch (e) {
-            console.error('❌ Focus timer notification error:', e);
         }
-    }, minutes * 60000);
-});
-
-// ==========================================
-// 2. INFORMATION VAULT, HABITS & PARKING LOT
-// ==========================================
-
-slackApp.command('/save', async ({ command, ack, client }) => {
-    await ack();
-    const parts = command.text.split(' ');
-    const content = parts[0];
-    const tags = parts.slice(1).join(' ') || "general";
-    if (!content) {
-        return await client.chat.postEphemeral({ channel: command.channel_id, user: command.user_id, text: "Usage: `/save [content] [tags...]`" });
-    }
-    try {
-        await getVaultCol(command.user_id).add({ content, tags, timestamp: Date.now() });
-        await client.chat.postEphemeral({ channel: command.channel_id, user: command.user_id, text: `📥 Saved: *${tags}*` });
     } catch (e) {
-        console.error('❌ /save error:', e);
-        await client.chat.postEphemeral({ channel: command.channel_id, user: command.user_id, text: "Error saving to vault." });
-    }
-});
-
-slackApp.command('/find', async ({ command, ack, client }) => {
-    await ack();
-    const searchTag = command.text.toLowerCase();
-    try {
-        const snapshot = await getVaultCol(command.user_id).get();
-        const results = [];
-        snapshot.forEach(doc => {
-            const data = doc.data();
-            if (data.tags.toLowerCase().includes(searchTag)) results.push(data.content);
-        });
-        await client.chat.postEphemeral({ channel: command.channel_id, user: command.user_id, text: results.length ? `*Results:*\n${results.join('\n')}` : "None found." });
-    } catch (e) {
-        console.error('❌ /find error:', e);
-        await client.chat.postEphemeral({ channel: command.channel_id, user: command.user_id, text: "Error searching vault." });
-    }
-});
-
-slackApp.command('/habit', async ({ command, ack, client }) => {
-    await ack();
-    if (!command.text) {
-        return await client.chat.postEphemeral({ channel: command.channel_id, user: command.user_id, text: "Usage: `/habit [habit name]`" });
-    }
-    try {
-        await getHabitsCol(command.user_id).add({ habit: command.text.trim(), date: new Date().toISOString().split('T')[0] });
-        await client.chat.postEphemeral({ channel: command.channel_id, user: command.user_id, text: `✅ Logged: *${command.text}*` });
-    } catch (e) {
-        console.error('❌ /habit error:', e);
-        await client.chat.postEphemeral({ channel: command.channel_id, user: command.user_id, text: "Error logging habit." });
-    }
-});
-
-slackApp.command('/park', async ({ command, ack, client }) => {
-    await ack();
-    if (!command.text) {
-        return await client.chat.postEphemeral({ channel: command.channel_id, user: command.user_id, text: "Usage: `/park [idea]`" });
-    }
-    try {
-        await getParkingLotCol(command.user_id).add({ idea: command.text, timestamp: Date.now() });
-        await client.chat.postEphemeral({ channel: command.channel_id, user: command.user_id, text: "🚗 Idea parked." });
-    } catch (e) {
-        console.error('❌ /park error:', e);
-        await client.chat.postEphemeral({ channel: command.channel_id, user: command.user_id, text: "Error parking idea." });
-    }
-});
-
-slackApp.command('/review', async ({ command, ack, client }) => {
-    await ack();
-    try {
-        const snapshot = await getParkingLotCol(command.user_id).get();
-        const blocks = [{ type: "header", text: { type: "plain_text", text: "🅿️ Parking Lot" } }];
-        snapshot.forEach(docSnap => {
-            blocks.push({
-                type: "section",
-                text: { type: "mrkdwn", text: `• ${docSnap.data().idea}` },
-                accessory: { type: "button", text: { type: "plain_text", text: "To Task" }, action_id: "park_to_task", value: JSON.stringify({ id: docSnap.id, idea: docSnap.data().idea }) }
-            });
-        });
-        if (blocks.length === 1) blocks.push({ type: "section", text: { type: "mrkdwn", text: "No parked ideas." } });
-        await client.chat.postEphemeral({ channel: command.channel_id, user: command.user_id, blocks });
-    } catch (e) {
-        console.error('❌ /review error:', e);
-        await client.chat.postEphemeral({ channel: command.channel_id, user: command.user_id, text: "Error loading parking lot." });
+        console.error('Cron Error:', e);
     }
 });
 
 // ==========================================
-// 3. CORE TASKS & REMINDERS
+// 2. MODAL CONSTRUCTORS
 // ==========================================
 
+const openReminderModal = (client, trigger_id) => {
+    return client.views.open({
+        trigger_id,
+        view: {
+            type: "modal",
+            callback_id: "setup_reminder_view",
+            title: { type: "plain_text", text: "Set Reminder" },
+            blocks: [
+                {
+                    type: "input",
+                    block_id: "task_block",
+                    element: { type: "plain_text_input", action_id: "text" },
+                    label: { type: "plain_text", text: "Reminder Text" }
+                },
+                {
+                    type: "input",
+                    block_id: "freq_block",
+                    element: {
+                        type: "static_select",
+                        action_id: "frequency",
+                        options: [
+                            { text: { type: "plain_text", text: "Daily" }, value: "daily" },
+                            { text: { type: "plain_text", text: "Weekly" }, value: "weekly" }
+                        ]
+                    },
+                    label: { type: "plain_text", text: "Frequency" }
+                },
+                {
+                    type: "input",
+                    block_id: "day_block",
+                    optional: true,
+                    element: {
+                        type: "static_select",
+                        action_id: "day",
+                        options: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"].map(d => ({
+                            text: { type: "plain_text", text: d }, value: d
+                        }))
+                    },
+                    label: { type: "plain_text", text: "Day (for Weekly)" }
+                },
+                {
+                    type: "input",
+                    block_id: "time_block",
+                    element: { type: "plain_text_input", action_id: "time", placeholder: "HH:MM (e.g. 09:30)" },
+                    label: { type: "plain_text", text: "Time" }
+                }
+            ],
+            submit: { type: "plain_text", text: "Schedule" }
+        }
+    });
+};
+
+// ==========================================
+// 3. COMMANDS (TASK & REMINDER MANAGEMENT)
+// ==========================================
+
+// Add Task (Modal)
 slackApp.command('/task', async ({ command, ack, client }) => {
     await ack();
-    if (!command.text) {
-        return await client.chat.postEphemeral({ channel: command.channel_id, user: command.user_id, text: "Usage: `/task [description]`" });
-    }
-    try {
-        await getTasksCol(command.user_id).add({ text: command.text, createdAt: Date.now(), status: 'active' });
-        await client.chat.postEphemeral({ channel: command.channel_id, user: command.user_id, text: `📌 Task added.` });
-    } catch (e) {
-        console.error('❌ /task error:', e);
-        await client.chat.postEphemeral({ channel: command.channel_id, user: command.user_id, text: "Error creating task." });
-    }
+    await client.views.open({
+        trigger_id: command.trigger_id,
+        view: {
+            type: "modal",
+            callback_id: "add_task_view",
+            title: { type: "plain_text", text: "New Task" },
+            blocks: [
+                {
+                    type: "input",
+                    block_id: "task_input",
+                    element: { type: "plain_text_input", action_id: "text_val" },
+                    label: { type: "plain_text", text: "Task Description" }
+                }
+            ],
+            submit: { type: "plain_text", text: "Add" }
+        }
+    });
 });
 
+// View Tasks (With Delete/Done)
 slackApp.command('/tasks', async ({ command, ack, client }) => {
     await ack();
-    try {
-        const snapshot = await getTasksCol(command.user_id).get();
-        const blocks = [{ type: "header", text: { type: "plain_text", text: "📋 Active Tasks" } }];
-        snapshot.forEach((docSnap) => {
-            const data = docSnap.data();
-            if (data.status === 'active') {
-                blocks.push({
-                    type: "section",
-                    text: { type: "mrkdwn", text: `• ${data.text}` },
-                    accessory: { type: "button", text: { type: "plain_text", text: "Done" }, action_id: "complete_task", value: JSON.stringify({ id: docSnap.id, text: data.text }), style: "primary" }
-                });
+    const snapshot = await getCol(command.user_id, 'tasks').get();
+    const blocks = [{ type: "header", text: { type: "plain_text", text: "📋 Your Active Tasks" } }];
+
+    snapshot.forEach(docSnap => {
+        const data = docSnap.data();
+        blocks.push({
+            type: "section",
+            text: { type: "mrkdwn", text: `• ${data.text}` },
+            accessory: {
+                type: "button",
+                text: { type: "plain_text", text: "Done" },
+                style: "primary",
+                action_id: "remove_item",
+                value: JSON.stringify({ col: 'tasks', id: docSnap.id, label: data.text })
             }
         });
-        if (blocks.length === 1) blocks.push({ type: "section", text: { type: "mrkdwn", text: "No active tasks." } });
-        await client.chat.postEphemeral({ channel: command.channel_id, user: command.user_id, blocks });
-    } catch (e) {
-        console.error('❌ /tasks error:', e);
-        await client.chat.postEphemeral({ channel: command.channel_id, user: command.user_id, text: "Error loading tasks." });
-    }
+    });
+
+    if (blocks.length === 1) blocks.push({ type: "section", text: { type: "mrkdwn", text: "_No active tasks._" } });
+    await client.chat.postEphemeral({ channel: command.channel_id, user: command.user_id, blocks });
 });
 
-// ==========================================
-// ACTION & VIEW HANDLERS
-// ==========================================
-
-slackApp.action('complete_task', async ({ ack, body, action, client }) => {
+// Add Reminder (Modal)
+slackApp.command('/remind', async ({ command, ack, client }) => {
     await ack();
-    try {
-        const { id, text } = JSON.parse(action.value);
-        await getTasksCol(body.user.id).doc(id).delete();
-        await getLogsCol(body.user.id).add({ text: `✅ Done: ${text}`, timestamp: Date.now() });
-        await client.chat.postEphemeral({ channel: body.channel.id, user: body.user.id, text: `✅ Archived: ${text}` });
-    } catch (e) {
-        console.error('❌ complete_task error:', e);
-        await client.chat.postEphemeral({ channel: body.channel.id, user: body.user.id, text: "Error completing task." });
-    }
+    await openReminderModal(client, command.trigger_id);
 });
 
-slackApp.action('log_focus_done', async ({ ack, body, action, client }) => {
+// View Reminders (With Delete)
+slackApp.command('/reminders', async ({ command, ack, client }) => {
     await ack();
-    try {
-        await getLogsCol(body.user.id).add({
-            text: `Completed Focus Session: ${action.value}`,
-            timestamp: Date.now()
+    const snapshot = await getCol(command.user_id, 'reminders').get();
+    const blocks = [{ type: "header", text: { type: "plain_text", text: "⏰ Scheduled Reminders" } }];
+
+    snapshot.forEach(docSnap => {
+        const data = docSnap.data();
+        const sched = data.frequency === 'weekly' ? `${data.day} at ${data.time}` : `Daily at ${data.time}`;
+        blocks.push({
+            type: "section",
+            text: { type: "mrkdwn", text: `*${data.text}*\n_${sched}_` },
+            accessory: {
+                type: "button",
+                text: { type: "plain_text", text: "Delete" },
+                style: "danger",
+                action_id: "remove_item",
+                value: JSON.stringify({ col: 'reminders', id: docSnap.id, label: data.text })
+            }
         });
-        await client.chat.postEphemeral({ channel: body.channel.id, user: body.user.id, text: "✅ Focus session logged." });
-    } catch (e) {
-        console.error('❌ log_focus_done error:', e);
-        await client.chat.postEphemeral({ channel: body.channel.id, user: body.user.id, text: "Error logging focus session." });
-    }
+    });
+
+    if (blocks.length === 1) blocks.push({ type: "section", text: { type: "mrkdwn", text: "_No reminders set._" } });
+    await client.chat.postEphemeral({ channel: command.channel_id, user: command.user_id, blocks });
 });
 
-slackApp.action('park_to_task', async ({ ack, body, action, client }) => {
+// ==========================================
+// 4. VIEW & ACTION HANDLERS
+// ==========================================
+
+// Handle Modal Submissions
+slackApp.view('add_task_view', async ({ ack, body, view, client }) => {
     await ack();
+    const text = view.state.values.task_input.text_val.value;
+    await getCol(body.user.id, 'tasks').add({ text, createdAt: Date.now(), status: 'active' });
+});
+
+slackApp.view('setup_reminder_view', async ({ ack, body, view, client }) => {
+    await ack();
+    const v = view.state.values;
+    const reminder = {
+        text: v.task_block.text.value,
+        frequency: v.freq_block.frequency.selected_option.value,
+        day: v.day_block.day.selected_option?.value || null,
+        time: v.time_block.time.value
+    };
+    await getCol(body.user.id, 'reminders').add(reminder);
+});
+
+// Universal Remove Action (Works for Tasks and Reminders)
+slackApp.action('remove_item', async ({ ack, body, action, client }) => {
+    await ack();
+    const { col, id, label } = JSON.parse(action.value);
     try {
-        const { id, idea } = JSON.parse(action.value);
-        await getParkingLotCol(body.user.id).doc(id).delete();
-        await getTasksCol(body.user.id).add({ text: idea, createdAt: Date.now(), status: 'active' });
-        await client.chat.postEphemeral({ channel: body.channel.id, user: body.user.id, text: `🚀 Moved to Tasks!` });
+        await getCol(body.user.id, col).doc(id).delete();
+        await client.chat.postEphemeral({
+            channel: body.channel.id,
+            user: body.user.id,
+            text: `🗑 Removed: *${label}*`
+        });
     } catch (e) {
-        console.error('❌ park_to_task error:', e);
-        await client.chat.postEphemeral({ channel: body.channel.id, user: body.user.id, text: "Error moving idea to tasks." });
+        console.error(e);
     }
 });
 
-// ==========================================
-// STARTUP
-// ==========================================
 (async () => {
-    try {
-        await slackApp.start();
-        console.log('✅ Personal Assistant Bot is online');
-        console.log('📋 Available commands: /focus, /task, /tasks, /save, /find, /habit, /park, /review');
-    } catch (err) {
-        console.error('❌ Failed to start bot:', err);
-        process.exit(1);
-    }
+    await slackApp.start();
+    console.log('✅ Assistant Online: Commands /task, /tasks, /remind, /reminders available.');
 })();
