@@ -40,6 +40,25 @@ const slackApp = new App({
     appToken: process.env.SLACK_APP_TOKEN,
     logLevel: LogLevel.INFO,
 });
+slackApp.command('/help', async ({ command, ack, client }) => {
+    await ack();
+    await client.chat.postEphemeral({
+        channel: command.channel_id,
+        user: command.user_id,
+        text: "*Personal Assistant Commands:*\n" +
+              "• `/task` - Add a new task (Modal)\n" +
+              "• `/tasks` - View/Complete active tasks\n" +
+              "• `/remind` - Set daily/weekly reminders (Modal)\n" +
+              "• `/reminders` - View/Delete reminders\n" +
+              "• `/save [content] [tags]` - Save info to vault\n" +
+              "• `/find [tag]` - Search your vault\n" +
+              "• `/habit [name]` - Log a daily habit\n" +
+              "• `/park [idea]` - Note down an idea\n" +
+              "• `/review` - View parked ideas\n" +
+              "• `/focus [min] [task]` - Start focus timer"
+    });
+});
+
 
 // ==========================================
 // 1. REMINDERS ENGINE (CRON)
