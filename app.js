@@ -88,7 +88,7 @@ slackApp.command('/help', async ({ command, ack, client }) => {
         text: "*Personal Assistant Commands:*\n" +
               "• `/task` - Add task (Modal with Priorities)\n" +
               "• `/tasks` - View/Done active tasks\n" +
-              "• `/remind` - Set timezone-aware reminders\n" +
+              "• `/reminds` - Set timezone-aware reminders\n" +
               "• `/reminders` - View/Delete reminders\n" +
               "• `/save [content] [tags]` - Save info to vault\n" +
               "• `/find [tag]` - Search vault\n" +
