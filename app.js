@@ -88,7 +88,7 @@ slackApp.command('/help', async ({ command, ack, client }) => {
         text: "*Personal Assistant Commands:*\n" +
               "• `/task` - Add task (Modal with Priorities)\n" +
               "• `/tasks` - View/Done active tasks\n" +
-              "• `/reminds` - Set timezone-aware reminders\n" +
+              "• `/remind` - Set timezone-aware reminders\n" +
               "• `/reminders` - View/Delete reminders\n" +
               "• `/save [content] [tags]` - Save info to vault\n" +
               "• `/find [tag]` - Search vault\n" +
@@ -101,38 +101,42 @@ slackApp.command('/help', async ({ command, ack, client }) => {
 
 slackApp.command('/task', async ({ command, ack, client }) => {
     await ack();
-    await client.views.open({
-        trigger_id: command.trigger_id,
-        view: {
-            type: "modal",
-            callback_id: "add_task_view",
-            title: { type: "plain_text", text: "New Task" },
-            blocks: [
-                {
-                    type: "input",
-                    block_id: "task_input",
-                    element: { type: "plain_text_input", action_id: "text_val" },
-                    label: { type: "plain_text", text: "Task Description" }
-                },
-                {
-                    type: "input",
-                    block_id: "priority_input",
-                    element: {
-                        type: "static_select",
-                        action_id: "priority_val",
-                        initial_option: { text: { type: "plain_text", text: "Medium" }, value: "medium" },
-                        options: [
-                            { text: { type: "plain_text", text: "🔴 High" }, value: "high" },
-                            { text: { type: "plain_text", text: "🟡 Medium" }, value: "medium" },
-                            { text: { type: "plain_text", text: "🔵 Low" }, value: "low" }
-                        ]
+    try {
+        await client.views.open({
+            trigger_id: command.trigger_id,
+            view: {
+                type: "modal",
+                callback_id: "add_task_view",
+                title: { type: "plain_text", text: "New Task" },
+                blocks: [
+                    {
+                        type: "input",
+                        block_id: "task_input",
+                        element: { type: "plain_text_input", action_id: "text_val" },
+                        label: { type: "plain_text", text: "Task Description" }
                     },
-                    label: { type: "plain_text", text: "Priority" }
-                }
-            ],
-            submit: { type: "plain_text", text: "Add" }
-        }
-    });
+                    {
+                        type: "input",
+                        block_id: "priority_input",
+                        element: {
+                            type: "static_select",
+                            action_id: "priority_val",
+                            initial_option: { text: { type: "plain_text", text: "Medium" }, value: "medium" },
+                            options: [
+                                { text: { type: "plain_text", text: "🔴 High" }, value: "high" },
+                                { text: { type: "plain_text", text: "🟡 Medium" }, value: "medium" },
+                                { text: { type: "plain_text", text: "🔵 Low" }, value: "low" }
+                            ]
+                        },
+                        label: { type: "plain_text", text: "Priority" }
+                    }
+                ],
+                submit: { type: "plain_text", text: "Add" }
+            }
+        });
+    } catch (error) {
+        console.error("Task Modal Error:", error);
+    }
 });
 
 slackApp.command('/tasks', async ({ command, ack, client }) => {
@@ -161,29 +165,47 @@ slackApp.command('/tasks', async ({ command, ack, client }) => {
 });
 
 slackApp.command('/remind', async ({ command, ack, client }) => {
+    // 1. Immediately acknowledge the command to prevent "dispatch_failed"
     await ack();
-    const userDoc = await db.collection('artifacts').doc(appId).collection('users').doc(command.user_id).get();
-    if (!userDoc.exists || !userDoc.data().timezone) {
-        const userInfo = await client.users.info({ user: command.user_id });
-        await db.collection('artifacts').doc(appId).collection('users').doc(command.user_id).set({
-            timezone: userInfo.user.tz || 'UTC'
-        }, { merge: true });
-    }
-    await client.views.open({
-        trigger_id: command.trigger_id,
-        view: {
-            type: "modal",
-            callback_id: "setup_reminder_view",
-            title: { type: "plain_text", text: "Set Reminder" },
-            blocks: [
-                { type: "input", block_id: "text_block", element: { type: "plain_text_input", action_id: "text" }, label: { type: "plain_text", text: "Reminder" } },
-                { type: "input", block_id: "freq_block", element: { type: "static_select", action_id: "frequency", options: [{ text: { type: "plain_text", text: "Daily" }, value: "daily" }, { text: { type: "plain_text", text: "Weekly" }, value: "weekly" }] }, label: { type: "plain_text", text: "Frequency" } },
-                { type: "input", block_id: "time_block", element: { type: "timepicker", action_id: "time" }, label: { type: "plain_text", text: "Time" } },
-                { type: "input", block_id: "day_block", optional: true, element: { type: "static_select", action_id: "day", options: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"].map(d => ({ text: { type: "plain_text", text: d }, value: d })) }, label: { type: "plain_text", text: "Day (Weekly)" } }
-            ],
-            submit: { type: "plain_text", text: "Schedule" }
+
+    try {
+        // 2. Fetch User Timezone if missing (done after ack to stay within 3s limit)
+        const userDocRef = db.collection('artifacts').doc(appId).collection('users').doc(command.user_id);
+        const userDoc = await userDocRef.get();
+        
+        if (!userDoc.exists || !userDoc.data().timezone) {
+            const userInfo = await client.users.info({ user: command.user_id });
+            if (userInfo.ok) {
+                await userDocRef.set({
+                    timezone: userInfo.user.tz || 'UTC'
+                }, { merge: true });
+            }
         }
-    });
+
+        // 3. Open Modal
+        await client.views.open({
+            trigger_id: command.trigger_id,
+            view: {
+                type: "modal",
+                callback_id: "setup_reminder_view",
+                title: { type: "plain_text", text: "Set Reminder" },
+                blocks: [
+                    { type: "input", block_id: "text_block", element: { type: "plain_text_input", action_id: "text" }, label: { type: "plain_text", text: "Reminder" } },
+                    { type: "input", block_id: "freq_block", element: { type: "static_select", action_id: "frequency", options: [{ text: { type: "plain_text", text: "Daily" }, value: "daily" }, { text: { type: "plain_text", text: "Weekly" }, value: "weekly" }] }, label: { type: "plain_text", text: "Frequency" } },
+                    { type: "input", block_id: "time_block", element: { type: "timepicker", action_id: "time" }, label: { type: "plain_text", text: "Time" } },
+                    { type: "input", block_id: "day_block", optional: true, element: { type: "static_select", action_id: "day", options: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"].map(d => ({ text: { type: "plain_text", text: d }, value: d })) }, label: { type: "plain_text", text: "Day (Weekly)" } }
+                ],
+                submit: { type: "plain_text", text: "Schedule" }
+            }
+        });
+    } catch (error) {
+        console.error("Remind Error:", error);
+        await client.chat.postEphemeral({
+            channel: command.channel_id,
+            user: command.user_id,
+            text: "⚠️ Sorry, I couldn't open the reminder setup. Please try again."
+        });
+    }
 });
 
 slackApp.command('/reminders', async ({ command, ack, client }) => {
