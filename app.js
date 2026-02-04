@@ -88,7 +88,7 @@ slackApp.command('/help', async ({ command, ack, client }) => {
         text: "*Personal Assistant Commands:*\n" +
               "• `/task` - Add task (Modal with Priorities)\n" +
               "• `/tasks` - View/Done active tasks\n" +
-              "• `/remind` - Set timezone-aware reminders\n" +
+              "• `/reminds` - Set timezone-aware reminders\n" +
               "• `/reminders` - View/Delete reminders\n" +
               "• `/save [content] [tags]` - Save info to vault\n" +
               "• `/find [tag]` - Search vault\n" +
@@ -164,7 +164,7 @@ slackApp.command('/tasks', async ({ command, ack, client }) => {
     await client.chat.postEphemeral({ channel: command.channel_id, user: command.user_id, blocks });
 });
 
-slackApp.command('/remind', async ({ command, ack, client }) => {
+slackApp.command('/reminds', async ({ command, ack, client }) => {
     // 1. Immediately acknowledge the command to prevent "dispatch_failed"
     await ack();
 
@@ -210,19 +210,28 @@ slackApp.command('/remind', async ({ command, ack, client }) => {
 
 slackApp.command('/reminders', async ({ command, ack, client }) => {
     await ack();
-    const snapshot = await getUserCol(command.user_id, 'reminders').get();
-    const blocks = [{ type: "header", text: { type: "plain_text", text: "⏰ Scheduled Reminders" } }];
-    snapshot.forEach(docSnap => {
-        const data = docSnap.data();
-        const sched = data.frequency === 'weekly' ? `${data.day} at ${data.time}` : `Daily at ${data.time}`;
-        blocks.push({
-            type: "section",
-            text: { type: "mrkdwn", text: `*${data.text}*\n_${sched}_` },
-            accessory: { type: "button", text: { type: "plain_text", text: "Delete" }, style: "danger", action_id: "remove_item", value: JSON.stringify({ col: 'reminders', id: docSnap.id, label: data.text }) }
+    try {
+        const snapshot = await getUserCol(command.user_id, 'reminders').get();
+        const blocks = [{ type: "header", text: { type: "plain_text", text: "⏰ Scheduled Reminders" } }];
+        snapshot.forEach(docSnap => {
+            const data = docSnap.data();
+            const sched = data.frequency === 'weekly' ? `${data.day} at ${data.time}` : `Daily at ${data.time}`;
+            blocks.push({
+                type: "section",
+                text: { type: "mrkdwn", text: `*${data.text}*\n_${sched}_` },
+                accessory: { type: "button", text: { type: "plain_text", text: "Delete" }, style: "danger", action_id: "remove_item", value: JSON.stringify({ col: 'reminders', id: docSnap.id, label: data.text }) }
+            });
         });
-    });
-    if (snapshot.empty) blocks.push({ type: "section", text: { type: "mrkdwn", text: "_No reminders set._" } });
-    await client.chat.postEphemeral({ channel: command.channel_id, user: command.user_id, blocks });
+        if (snapshot.empty) blocks.push({ type: "section", text: { type: "mrkdwn", text: "_No reminders set._" } });
+        await client.chat.postEphemeral({ channel: command.channel_id, user: command.user_id, blocks });
+    } catch (error) {
+        console.error("Reminders Error:", error);
+        await client.chat.postEphemeral({
+            channel: command.channel_id,
+            user: command.user_id,
+            text: "⚠️ Sorry, I couldn't fetch your reminders. Please try again."
+        });
+    }
 });
 
 // ==========================================
