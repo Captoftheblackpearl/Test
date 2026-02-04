@@ -60,14 +60,25 @@ cron.schedule('* * * * *', async () => {
             const reminders = await userDoc.ref.collection('reminders').get();
             reminders.forEach(async (rem) => {
                 const data = rem.data();
+                
+                // Skip already fired one-time reminders
+                if (data.frequency === 'once' && data.fired) return;
+                
+                const userDateString = now.toLocaleDateString('en-CA', { timeZone: userTz }); // YYYY-MM-DD format
                 const shouldFire = (data.frequency === 'daily' && data.time === userTimeString) ||
-                                   (data.frequency === 'weekly' && data.day === userDay && data.time === userTimeString);
+                                   (data.frequency === 'weekly' && data.day === userDay && data.time === userTimeString) ||
+                                   (data.frequency === 'once' && data.date === userDateString && data.time === userTimeString);
 
                 if (shouldFire) {
                     await slackApp.client.chat.postMessage({
                         channel: userDoc.id,
                         text: `⏰ *Reminder:* ${data.text}`
                     });
+                    
+                    // Mark one-time reminders as fired
+                    if (data.frequency === 'once') {
+                        await rem.ref.update({ fired: true });
+                    }
                 }
             });
         }
@@ -191,7 +202,8 @@ slackApp.command('/reminds', async ({ command, ack, client }) => {
                 title: { type: "plain_text", text: "Set Reminder" },
                 blocks: [
                     { type: "input", block_id: "text_block", element: { type: "plain_text_input", action_id: "text" }, label: { type: "plain_text", text: "Reminder" } },
-                    { type: "input", block_id: "freq_block", element: { type: "static_select", action_id: "frequency", options: [{ text: { type: "plain_text", text: "Daily" }, value: "daily" }, { text: { type: "plain_text", text: "Weekly" }, value: "weekly" }] }, label: { type: "plain_text", text: "Frequency" } },
+                    { type: "input", block_id: "freq_block", element: { type: "static_select", action_id: "frequency", options: [{ text: { type: "plain_text", text: "One Time" }, value: "once" }, { text: { type: "plain_text", text: "Daily" }, value: "daily" }, { text: { type: "plain_text", text: "Weekly" }, value: "weekly" }] }, label: { type: "plain_text", text: "Frequency" } },
+                    { type: "input", block_id: "date_block", optional: true, element: { type: "datepicker", action_id: "date" }, label: { type: "plain_text", text: "Date (One Time)" } },
                     { type: "input", block_id: "time_block", element: { type: "timepicker", action_id: "time" }, label: { type: "plain_text", text: "Time" } },
                     { type: "input", block_id: "day_block", optional: true, element: { type: "static_select", action_id: "day", options: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"].map(d => ({ text: { type: "plain_text", text: d }, value: d })) }, label: { type: "plain_text", text: "Day (Weekly)" } }
                 ],
@@ -215,7 +227,14 @@ slackApp.command('/reminders', async ({ command, ack, client }) => {
         const blocks = [{ type: "header", text: { type: "plain_text", text: "⏰ Scheduled Reminders" } }];
         snapshot.forEach(docSnap => {
             const data = docSnap.data();
-            const sched = data.frequency === 'weekly' ? `${data.day} at ${data.time}` : `Daily at ${data.time}`;
+            let sched;
+            if (data.frequency === 'once') {
+                sched = `${data.date} at ${data.time}`;
+            } else if (data.frequency === 'weekly') {
+                sched = `${data.day} at ${data.time}`;
+            } else {
+                sched = `Daily at ${data.time}`;
+            }
             blocks.push({
                 type: "section",
                 text: { type: "mrkdwn", text: `*${data.text}*\n_${sched}_` },
@@ -313,11 +332,24 @@ slackApp.view('setup_reminder_view', async ({ ack, body, view }) => {
     const v = view.state.values;
     const frequency = v.freq_block.frequency.selected_option.value;
     const day = v.day_block.day.selected_option?.value;
+    const date = v.date_block.date.selected_date;
+    
     if (frequency === 'weekly' && !day) {
         return await ack({ response_action: "errors", errors: { day_block: "Select a day for weekly reminders." } });
     }
+    if (frequency === 'once' && !date) {
+        return await ack({ response_action: "errors", errors: { date_block: "Select a date for one-time reminders." } });
+    }
+    
     await ack();
-    await getUserCol(body.user.id, 'reminders').add({ text: v.text_block.text.value, frequency, day: day || null, time: v.time_block.time.selected_time });
+    await getUserCol(body.user.id, 'reminders').add({ 
+        text: v.text_block.text.value, 
+        frequency, 
+        day: day || null, 
+        date: date || null,
+        time: v.time_block.time.selected_time,
+        fired: false
+    });
 });
 
 slackApp.action('remove_item', async ({ ack, body, action, client }) => {
